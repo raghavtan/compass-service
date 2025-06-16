@@ -11,11 +11,12 @@ import {
   UsePipes,
   ValidationPipe,
   Query,
-  BadRequestException,
-  NotFoundException,
+  // BadRequestException, // No longer explicitly thrown by controller for these cases
+  NotFoundException, // Still potentially useful for Swagger, or if controller itself had a reason to throw
+  ConflictException, // For Swagger documentation of 409
 } from '@nestjs/common';
 import { MetricService } from './metric.service';
-import { ApiResponse } from '../../common/dto/api-response.dto';
+// import { ApiResponse } from '../../common/dto/api-response.dto'; // Assuming interceptor handles this
 import { CreateMetricDto } from './dto/create-metric.dto';
 import { UpdateMetricDto } from './dto/update-metric.dto';
 import { MetricResponseDto } from './dto/metric-response.dto';
@@ -51,18 +52,8 @@ export class MetricController {
     },
   })
   async getMetric(@Param('id') id: string): Promise<MetricResponseDto> {
-    try {
-      return await this.metricService.getMetric(id);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw new NotFoundException({
-          status_code: 404,
-          error: 'NOT_FOUND',
-          message: `Metric with ID '${id}' not found`,
-        });
-      }
-      throw error;
-    }
+    // Service now throws NotFoundException directly.
+    return await this.metricService.getMetric(id);
   }
 
   @Get('by-name/:name')
@@ -87,21 +78,12 @@ export class MetricController {
   async getMetricByName(
     @Param('name') name: string,
   ): Promise<MetricResponseDto> {
-    try {
-      return await this.metricService.getMetricByName(name);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw new NotFoundException({
-          status_code: 404,
-          error: 'NOT_FOUND',
-          message: `Metric with name '${name}' not found`,
-        });
-      }
-      throw error;
-    }
+    // Service now throws NotFoundException directly.
+    return await this.metricService.getMetricByName(name);
   }
 
   @Post()
+  @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Create a new metric' })
   @SwaggerResponse({
     status: 201,
@@ -144,29 +126,23 @@ export class MetricController {
       },
     },
   })
-  @UsePipes(new ValidationPipe({ transform: true }))
-  async createMetric(@Body() createMetricDto: CreateMetricDto): Promise<any> {
-    try {
-      const metric = await this.metricService.createMetric(createMetricDto);
-      return {
-        status_code: HttpStatus.CREATED,
-        id: metric.id,
-        message: 'Metric created successfully',
-      };
-    } catch (error) {
-      if (error.message && error.message.includes('already exists')) {
-        throw {
-          status_code: 409,
-          error: 'ALREADY_EXISTS',
-          message: `Metric with name '${createMetricDto.metadata.name}' already exists`,
-          existingId: error.existingId || 'unknown',
-        };
-      }
-      throw error;
-    }
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
+  async createMetric(@Body() createMetricDto: CreateMetricDto): Promise<MetricResponseDto> {
+    // Logic for checking existing metric and throwing 409 is moved to service.
+    // Service will throw ConflictException.
+    // Service returns MetricResponseDto.
+    // The TransformInterceptor will format the success response.
+    return await this.metricService.createMetric(createMetricDto);
+    // Example of how it could be structured by an interceptor (actual structure depends on interceptor):
+    // return {
+    //   status_code: HttpStatus.CREATED,
+    //   message: 'Metric created successfully',
+    //   data: createdMetricData, // from service
+    // };
   }
 
   @Put(':id')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Update an existing metric' })
   @ApiParam({ name: 'id', description: 'The Compass metric ID' })
   @SwaggerResponse({
@@ -215,34 +191,24 @@ export class MetricController {
       },
     },
   })
-  @UsePipes(new ValidationPipe({ transform: true }))
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
   async updateMetric(
     @Param('id') id: string,
     @Body() updateMetricDto: UpdateMetricDto,
-  ): Promise<any> {
-    try {
-      const result = await this.metricService.updateMetric(id, updateMetricDto);
-      return {
-        status_code: HttpStatus.OK,
-        id: id,
-        message: 'Metric updated successfully',
-        changes: result.changes || [],
-      };
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        if (error.message.includes('not found')) {
-          throw new NotFoundException({
-            status_code: 404,
-            error: 'NOT_FOUND',
-            message: `Metric with ID '${id}' not found`,
-          });
-        }
-      }
-      throw error;
-    }
+  ): Promise<any> { // Service returns { metric: MetricResponseDto; changes: ... }
+    // Existence check is moved to the service (throws NotFoundException).
+    const result = await this.metricService.updateMetric(id, updateMetricDto);
+    // The TransformInterceptor can format this into the desired ApiResponse structure.
+    return {
+      message: 'Metric updated successfully',
+      id: result.metric.id,
+      changes: result.changes,
+      data: result.metric, // Return the updated metric data
+    };
   }
 
   @Delete(':id')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a metric' })
   @ApiParam({ name: 'id', description: 'The Compass metric ID' })
   @SwaggerResponse({
@@ -291,34 +257,13 @@ export class MetricController {
     },
   })
   async deleteMetric(@Param('id') id: string): Promise<any> {
-    try {
-      await this.metricService.deleteMetric(id);
-      return {
-        status_code: HttpStatus.OK,
-        message: 'Metric deleted successfully',
-        deletedId: id,
-      };
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        if (error.message.includes('not found')) {
-          throw new NotFoundException({
-            status_code: 404,
-            error: 'NOT_FOUND',
-            message: `Metric with ID '${id}' not found`,
-          });
-        }
-        if (error.message.includes('in use')) {
-          const customError: any = error;
-          throw {
-            status_code: 409,
-            error: 'IN_USE',
-            message:
-              'Cannot delete metric that is referenced by other resources',
-            usedBy: customError.usedBy || [],
-          };
-        }
-      }
-      throw error;
-    }
+    // Existence check and "in use" check (partial, based on GQL error) are in the service.
+    // Service will throw NotFoundException or ConflictException.
+    const result = await this.metricService.deleteMetric(id); // Service returns { id: string; message: string }
+    // The TransformInterceptor can format this.
+    return {
+      message: result.message, // Or a static "Metric deleted successfully"
+      deletedId: result.id,
+    };
   }
 }

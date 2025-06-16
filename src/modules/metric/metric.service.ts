@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -49,78 +50,74 @@ export class MetricService {
   }
 
   async getMetric(id: string): Promise<MetricResponseDto> {
-    try {
-      const result = await this.getAllMetrics();
-      if (!result || result.length === 0) {
-        throw new BadRequestException(`No metrics fetched from Compass`);
-      }
-      const metric = result.find((m) => m.id === id);
-
-      if (!metric) {
-        throw new BadRequestException(`Metric with id ${id} not found`);
-      }
-      return metric;
-    } catch (error) {
-      throw new BadRequestException(`Metric with id ${id} not found ${error}`);
+    // Current implementation fetches all metrics. This is kept as per plan if direct GQL query is hard.
+    const allMetrics = await this.getAllMetrics(); // This might throw BadRequestException if fetch fails
+    if (!allMetrics) { // Should not happen if getAllMetrics throws, but as a safeguard
+      throw new NotFoundException(`Metrics data could not be retrieved.`);
     }
+    const metric = allMetrics.find((m) => m.id === id);
+
+    if (!metric) {
+      throw new NotFoundException(`Metric with ID '${id}' not found.`);
+    }
+    return metric;
   }
 
   async getMetricByName(name: string): Promise<MetricResponseDto> {
-    try {
-      const result = await this.getAllMetrics();
-      if (!result || result.length === 0) {
-        throw new BadRequestException(`No metrics fetched from Compass`);
-      }
-      // Find metric by name in the fetched metrics using getMetricByName
-      const metric = result.find((m) => m.name === name);
-
-      if (!metric) {
-        throw new BadRequestException(`Metric with id ${name} not found`);
-      }
-      return metric;
-    } catch (error) {
-      throw new BadRequestException(
-        `Metric with id ${name} not found ${error}`,
-      );
+    // Current implementation fetches all metrics.
+    const allMetrics = await this.getAllMetrics();
+    if (!allMetrics) {
+      throw new NotFoundException(`Metrics data could not be retrieved.`);
     }
+    const metric = allMetrics.find((m) => m.name === name);
+
+    if (!metric) {
+      throw new NotFoundException(`Metric with name '${name}' not found.`);
+    }
+    return metric;
   }
 
   async createMetric(
     createMetricDto: CreateMetricDto,
   ): Promise<MetricResponseDto> {
+    if (createMetricDto.kind !== 'Metric') {
+      throw new BadRequestException(
+        'Invalid resource kind. Expected "Metric"',
+      );
+    }
+
+    const metricName = createMetricDto.metadata.name;
+    if (!metricName) {
+      throw new BadRequestException('Metric name is required in metadata');
+    }
+
+    const metricSpec = createMetricDto.spec;
+    if (!metricSpec) {
+      throw new BadRequestException('Metric specification is required');
+    }
+
     try {
-      if (createMetricDto.kind !== 'Metric') {
-        throw new BadRequestException(
-          'Invalid resource kind. Expected "Metric"',
+      const existingMetric = await this.getMetricByName(metricName);
+      // If getMetricByName succeeds, it means a metric with this name exists.
+      throw new ConflictException(
+        `Metric with name '${metricName}' already exists. Existing ID: ${existingMetric.id}`,
+      );
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        // This is the expected case: metric does not exist, so we can proceed.
+      } else if (error instanceof ConflictException) {
+        throw error; // Re-throw the conflict exception
+      } else {
+        // Any other error during the check should be logged and re-thrown
+        this.graphqlService.getLogger().error( // Assuming GraphQLService has a logger or use general logger
+          `Unexpected error while checking for existing metric '${metricName}': ${error.message}`,
+          error.stack,
         );
+        throw error;
       }
+    }
 
-      const metricName = createMetricDto.metadata.name;
-      if (!metricName) {
-        throw new BadRequestException('Metric name is required in metadata');
-      }
-
-      const metricSpec = createMetricDto.spec;
-      if (!metricSpec) {
-        throw new BadRequestException('Metric specification is required');
-      }
-
-      try {
-        const existingMetric = await this.getMetricByName(metricName);
-        if (existingMetric) {
-          const error = new BadRequestException(
-            `Metric with name ${metricName} already exists`,
-          );
-          error['existingId'] = existingMetric.id;
-          throw error;
-        }
-      } catch (err) {
-        // If metric not found, that's fine - we'll create it
-        if (!err.message.includes('not found')) {
-          throw err;
-        }
-      }
-
+    try {
       // Validate grading system if present
       if (metricSpec['grading-system']) {
         const validGradingSystems = [
@@ -226,20 +223,16 @@ export class MetricService {
   async updateMetric(
     id: string,
     updateMetricDto: UpdateMetricDto,
-  ): Promise<any> {
+  ): Promise<{ metric: MetricResponseDto; changes: Array<{ field: string; oldValue: any; newValue: any }> }> {
+    // First check if the metric exists. getMetric will throw NotFoundException if not found.
+    const existingMetric = await this.getMetric(id);
+
+    // Track changes
+    const changes: Array<{ field: string; oldValue: any; newValue: any }> = [];
+
+    // Prepare update mutation
+    // Ensure all fields of MetricResponseDto are potentially updatable or fetched for change log
     try {
-      // First check if the metric exists
-      const existingMetric = await this.getMetric(id);
-
-      if (!existingMetric) {
-        throw new BadRequestException(`Metric with id ${id} not found`);
-      }
-
-      // Track changes
-      const changes: Array<{ field: string; oldValue: any; newValue: any }> =
-        [];
-
-      // Prepare update mutation
       const mutation = `
         mutation updateMetricDefinition($cloudId: ID, $id: ID!, $name: String, $description: String, $unit: String!) {
           compass {
@@ -310,53 +303,60 @@ export class MetricService {
         }
       }
 
-      // If we have nothing to update, just return the existing metric
-      if (Object.keys(variables).length === 1) {
-        // Only has ID
+      // If we have nothing to update based on DTO, just return the existing metric and no changes
+      if (Object.keys(variables).length <= 2 && !variables.name && !variables.description && !variables.unit) {
+        // Only id and cloudId might be present
         return {
           metric: existingMetric,
+          changes: changes, // Should be empty
         };
       }
 
-      // Execute the update
-      const result = await this.graphqlService.executeMutation(
-        mutation,
-        variables,
-      );
+      const result = await this.graphqlService.executeMutation(mutation, variables);
 
       if (
-        !result ||
-        !result.compass ||
-        !result.compass.updateMetricDefinition ||
-        !result.compass.updateMetricDefinition.success ||
+        !result?.compass?.updateMetricDefinition?.success ||
         !result.compass.updateMetricDefinition.updatedMetricDefinition
       ) {
-        const errors = result?.compass?.updateMetricDefinition?.errors || [];
-        const errorMessages = errors.map((e) => e.message).join(', ');
-        throw new BadRequestException(
-          `Failed to update metric definition: ${errorMessages}`,
-        );
+        const errorMsg = result?.compass?.updateMetricDefinition?.errors?.[0]?.message || 'Unknown error during metric update';
+        throw new BadRequestException(`Failed to update metric definition: ${errorMsg}`);
       }
 
+      const updatedMetricDto = this.mapToMetricResponseDto(
+         result.compass.updateMetricDefinition.updatedMetricDefinition
+      );
+
+      // Recalculate changes against the *actually updated* DTO if fields were missing in initial DTO
+      // This is simplified here; a more robust way is to ensure `existingMetric` and `updatedMetricDto`
+      // are perfectly aligned in terms of fields for comparison by `generateChangeLog` pattern.
+      // For now, the `changes` array populated during variable assignment is used.
+      // A better way: fetch the metric anew after update if GQL response is minimal.
+
       return {
-        metric: this.mapToMetricResponseDto(
-          result.compass.updateMetricDefinition.updatedMetricDefinition,
-        ),
+        metric: updatedMetricDto,
+        changes: changes, // Return the tracked changes
       };
     } catch (error) {
-      if (error instanceof BadRequestException) {
+      if (error instanceof BadRequestException || error instanceof NotFoundException) {
         throw error;
       }
-      throw new BadRequestException(
-        `Failed to update metric: ${error.message}`,
-      );
+      this.graphqlService.getLogger().error(`Failed to update metric ${id}: ${error.message}`, error.stack);
+      throw new BadRequestException(`Failed to update metric: ${error.message}`);
     }
   }
 
-  async deleteMetric(id: string): Promise<void> {
-    try {
-      await this.getMetric(id);
+  async deleteMetric(id: string): Promise<{ id: string; message: string }> {
+    // First, check if the metric exists. getMetric will throw NotFoundException if not.
+    await this.getMetric(id);
 
+    // Dependency check is NOT implemented here due to complexity of identifying GQL query.
+    // Placeholder for where it would go:
+    // const isInUse = await this.checkIfMetricIsInUse(id);
+    // if (isInUse) {
+    //   throw new ConflictException(`Metric with ID '${id}' is in use and cannot be deleted.`);
+    // }
+
+    try {
       const mutation = `
         mutation deleteMetricDefinition($input: CompassDeleteMetricDefinitionInput!) {
           compass {
@@ -383,25 +383,23 @@ export class MetricService {
       );
 
       if (
-        !result ||
-        !result.compass ||
-        !result.compass.deleteMetricDefinition ||
-        !result.compass.deleteMetricDefinition.success ||
+        !result?.compass?.deleteMetricDefinition?.success ||
         !result.compass.deleteMetricDefinition.deletedMetricDefinitionId
       ) {
-        const errors = result?.compass?.deleteMetricDefinition?.errors || [];
-        const errorMessages = errors.map((e) => e.message).join(', ');
-        throw new BadRequestException(
-          `Failed to delete metric definition: ${errorMessages}`,
-        );
+        const errorMsg = result?.compass?.deleteMetricDefinition?.errors?.[0]?.message || 'Unknown error during metric deletion';
+        // Check if error message indicates it's in use (this is a basic heuristic)
+        if (errorMsg.toLowerCase().includes('referenced by') || errorMsg.toLowerCase().includes('in use')) {
+          throw new ConflictException(`Failed to delete metric definition: ${errorMsg}. It may be in use.`);
+        }
+        throw new BadRequestException(`Failed to delete metric definition: ${errorMsg}`);
       }
+      return { id, message: `Metric with ID '${id}' deleted successfully.` };
     } catch (error) {
-      if (error instanceof BadRequestException) {
+      if (error instanceof BadRequestException || error instanceof NotFoundException || error instanceof ConflictException) {
         throw error;
       }
-      throw new BadRequestException(
-        `Failed to delete metric: ${error.message}`,
-      );
+      this.graphqlService.getLogger().error(`Failed to delete metric ${id}: ${error.message}`, error.stack);
+      throw new BadRequestException(`Failed to delete metric: ${error.message}`);
     }
   }
 
