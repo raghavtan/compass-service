@@ -11,10 +11,11 @@ import {
   UsePipes,
   ValidationPipe,
   NotFoundException,
-  BadRequestException,
+  // BadRequestException, // No longer explicitly thrown for not found cases
+  ConflictException, // For handling 409 directly if needed, though service handles it
 } from '@nestjs/common';
 import { ComponentService } from './component.service';
-import { ApiResponse } from '../../common/dto/api-response.dto';
+// import { ApiResponse } from '../../common/dto/api-response.dto'; // Assuming interceptor handles this
 import {
   CreateComponentDto,
   UpdateComponentDto,
@@ -65,19 +66,8 @@ export class ComponentController {
     },
   })
   async getComponent(@Param('id') id: string): Promise<ComponentResponseDto> {
-    try {
-      return await this.componentService.getComponent(id);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw new NotFoundException({
-          status_code: 404,
-          error: 'NOT_FOUND',
-          message: `Component with ID '${id}' not found`,
-          timestamp: new Date().toISOString(),
-        });
-      }
-      throw error;
-    }
+    // Service now throws NotFoundException directly
+    return await this.componentService.getComponent(id);
   }
 
   @Get('by-name/:name')
@@ -103,19 +93,8 @@ export class ComponentController {
   async getComponentByName(
     @Param('name') name: string,
   ): Promise<ComponentResponseDto> {
-    try {
-      return await this.componentService.getComponentByName(name);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw new NotFoundException({
-          status_code: 404,
-          error: 'NOT_FOUND',
-          message: `Component with name '${name}' not found`,
-          timestamp: new Date().toISOString(),
-        });
-      }
-      throw error;
-    }
+    // Service now throws NotFoundException directly
+    return await this.componentService.getComponentByName(name);
   }
 
   @Get()
@@ -123,18 +102,15 @@ export class ComponentController {
   @SwaggerResponse({
     status: 200,
     description: 'Components fetched successfully',
+    // Assuming an interceptor will wrap this with ApiResponse
     type: [ComponentResponseDto],
   })
-  async getAllComponents(): Promise<ApiResponse<ComponentResponseDto[]>> {
-    const componentList = await this.componentService.getAllComponents();
-    return ApiResponse.success(
-      HttpStatus.OK,
-      'Components fetched successfully',
-      componentList,
-    );
+  async getAllComponents(): Promise<ComponentResponseDto[]> {
+    return await this.componentService.getAllComponents();
   }
 
   @Post()
+  @HttpCode(HttpStatus.CREATED) // Ensure 201 is returned on success
   @ApiOperation({ summary: 'Create a new component' })
   @SwaggerResponse({
     status: 201,
@@ -191,56 +167,26 @@ export class ComponentController {
       },
     },
   })
-  @UsePipes(new ValidationPipe({ transform: true }))
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
   async createComponent(
     @Body() createComponentDto: CreateComponentDto,
-  ): Promise<any> {
-    try {
-      // Check if component with the same name already exists
-      try {
-        const existingComponent =
-          await this.componentService.getComponentByName(
-            createComponentDto.spec.name,
-          );
-        if (existingComponent) {
-          throw {
-            status_code: 409,
-            error: 'ALREADY_EXISTS',
-            message: `Component with name '${createComponentDto.spec.name}' already exists`,
-            existingId: existingComponent.id,
-            timestamp: new Date().toISOString(),
-          };
-        }
-      } catch (err) {
-        // If component not found, continue with creation
-        if (!err.status_code) {
-          throw err;
-        }
-      }
-
-      const component =
-        await this.componentService.createComponent(createComponentDto);
-      return {
-        status_code: HttpStatus.CREATED,
-        id: component.id,
-        message: 'Component created successfully',
-        metricSources: component.metricSources || [],
-        createdAt: new Date().toISOString(),
-      };
-    } catch (error) {
-      if (error.status_code === 409) {
-        throw error;
-      }
-      throw new BadRequestException({
-        status_code: 400,
-        error: 'VALIDATION_ERROR',
-        message: `Failed to create component: ${error.message}`,
-        timestamp: new Date().toISOString(),
-      });
-    }
+  ): Promise<any> { // Return type will be ComponentCreateResponse from service now
+    // Logic for checking existing component and throwing 409 is moved to service.
+    // Service will throw ConflictException.
+    // Service returns ComponentCreateResponse, which includes id, metricSources etc.
+    // The global HttpExceptionFilter will handle formatting of ConflictException.
+    // The TransformInterceptor will format the success response if needed.
+    return await this.componentService.createComponent(createComponentDto);
+    // Example of how it could be structured by an interceptor:
+    // return {
+    //   status_code: HttpStatus.CREATED,
+    //   message: 'Component created successfully',
+    //   data: createdComponentData, // from service
+    // };
   }
 
   @Put(':id')
+  @HttpCode(HttpStatus.OK) // Ensure 200 is returned on success
   @ApiOperation({ summary: 'Update an existing component' })
   @ApiParam({ name: 'id', description: 'The Compass component ID' })
   @SwaggerResponse({
@@ -297,47 +243,27 @@ export class ComponentController {
       },
     },
   })
-  @UsePipes(new ValidationPipe({ transform: true }))
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
   async updateComponent(
     @Param('id') id: string,
     @Body() updateComponentDto: UpdateComponentDto,
-  ): Promise<any> {
-    try {
-      const existingComponent = await this.componentService.getComponent(id);
-      const result = await this.componentService.updateComponent(
-        id,
-        updateComponentDto,
-      );
-
-      // Generate change log
-      const changes = this.generateChangeLog(
-        existingComponent,
-        result.component,
-      );
-
-      return {
-        status_code: HttpStatus.OK,
-        id: id,
-        message: 'Component updated successfully',
-        updatedAt: new Date().toISOString(),
-        changes: changes || [],
-      };
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        if (error.message.includes('not found')) {
-          throw new NotFoundException({
-            status_code: 404,
-            error: 'NOT_FOUND',
-            message: `Component with ID '${id}' not found`,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-      throw error;
-    }
+  ): Promise<any> { // Service returns { component: ComponentResponseDto; changes: ... }
+    // Existence check (getComponent) and change log generation are moved to the service.
+    // Service will throw NotFoundException if component not found.
+    const result = await this.componentService.updateComponent(id, updateComponentDto);
+    // The TransformInterceptor can format this into the desired ApiResponse structure.
+    return {
+      // status_code: HttpStatus.OK, // Handled by @HttpCode or interceptor
+      message: 'Component updated successfully',
+      id: result.component.id,
+      // updatedAt: new Date().toISOString(), // Service DTO could include this
+      changes: result.changes,
+      data: result.component, // Or spread ...result if that's the desired structure
+    };
   }
 
   @Delete(':id')
+  @HttpCode(HttpStatus.OK) // Standard for successful DELETE, or 204 if no content returned
   @ApiOperation({ summary: 'Delete a component' })
   @ApiParam({ name: 'id', description: 'The Compass component ID' })
   @SwaggerResponse({
@@ -387,136 +313,18 @@ export class ComponentController {
       },
     },
   })
-  @HttpCode(HttpStatus.OK)
   async deleteComponent(@Param('id') id: string): Promise<any> {
-    try {
-      // First check if the component exists
-      await this.componentService.getComponent(id);
-
-      // Check for dependencies before deletion
-      const dependencies = await this.componentService.checkDependencies(id);
-      if (dependencies && dependencies.length > 0) {
-        throw {
-          status_code: 409,
-          error: 'HAS_DEPENDENCIES',
-          message: 'Cannot delete component with active dependencies',
-          dependencies: dependencies,
-          timestamp: new Date().toISOString(),
-        };
-      }
-
-      // If no dependencies, proceed with deletion
-      await this.componentService.deleteComponent(id);
-
-      return {
-        status_code: HttpStatus.OK,
-        message: 'Component deleted successfully',
-        deletedId: id,
-        deletedAt: new Date().toISOString(),
-      };
-    } catch (error) {
-      if (error.status_code === 409) {
-        throw error;
-      }
-      if (error instanceof BadRequestException) {
-        if (error.message.includes('not found')) {
-          throw new NotFoundException({
-            status_code: 404,
-            error: 'NOT_FOUND',
-            message: `Component with ID '${id}' not found`,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-      throw error;
-    }
+    // Existence check and dependency check are now handled by the service.
+    // Service will throw NotFoundException or ConflictException.
+    const result = await this.componentService.deleteComponent(id); // Service returns { id: string; message: string }
+    // The TransformInterceptor can format this.
+    return {
+      // status_code: HttpStatus.OK, // Handled by @HttpCode or interceptor
+      message: result.message, // Or a static message like "Component deleted successfully"
+      deletedId: result.id,
+      // deletedAt: new Date().toISOString(), // Could be part of service response if needed
+    };
   }
 
-  // Helper method to generate change log between original and updated component
-  private generateChangeLog(
-    original: ComponentResponseDto,
-    updated: ComponentResponseDto,
-  ) {
-    const changes: Array<{ field: string; oldValue: any; newValue: any }> = [];
-
-    // Compare basic fields
-    if (original.name !== updated.name) {
-      changes.push({
-        field: 'spec.name',
-        oldValue: original.name,
-        newValue: updated.name,
-      });
-    }
-
-    if (original.description !== updated.description) {
-      changes.push({
-        field: 'spec.description',
-        oldValue: original.description,
-        newValue: updated.description,
-      });
-    }
-
-    if (original.componentType !== updated.componentType) {
-      changes.push({
-        field: 'spec.componentType',
-        oldValue: original.componentType,
-        newValue: updated.componentType,
-      });
-    }
-
-    if (original.typeId !== updated.typeId) {
-      changes.push({
-        field: 'spec.typeId',
-        oldValue: original.typeId,
-        newValue: updated.typeId,
-      });
-    }
-
-    if (original.tribe !== updated.tribe) {
-      changes.push({
-        field: 'spec.tribe',
-        oldValue: original.tribe,
-        newValue: updated.tribe,
-      });
-    }
-
-    if (original.squad !== updated.squad) {
-      changes.push({
-        field: 'spec.squad',
-        oldValue: original.squad,
-        newValue: updated.squad,
-      });
-    }
-
-    // Compare dependencies
-    if (
-      JSON.stringify(original.dependsOn) !== JSON.stringify(updated.dependsOn)
-    ) {
-      changes.push({
-        field: 'spec.dependsOn',
-        oldValue: original.dependsOn,
-        newValue: updated.dependsOn,
-      });
-    }
-
-    // Compare links
-    if (JSON.stringify(original.links) !== JSON.stringify(updated.links)) {
-      changes.push({
-        field: 'spec.links',
-        oldValue: `${original.links?.length || 0} links`,
-        newValue: `${updated.links?.length || 0} links`,
-      });
-    }
-
-    // Compare labels
-    if (JSON.stringify(original.labels) !== JSON.stringify(updated.labels)) {
-      changes.push({
-        field: 'spec.labels',
-        oldValue: original.labels,
-        newValue: updated.labels,
-      });
-    }
-
-    return changes;
-  }
+  // generateChangeLog method is now removed from controller, it's in the service.
 }

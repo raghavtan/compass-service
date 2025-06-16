@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   CreateComponentDto,
   UpdateComponentDto,
@@ -43,6 +49,80 @@ interface Dependency {
 
 @Injectable()
 export class ComponentService {
+  // Helper method to generate change log between original and updated component
+  public generateChangeLog(
+    original: ComponentResponseDto,
+    updated: ComponentResponseDto,
+  ): Array<{ field: string; oldValue: any; newValue: any }> {
+    const changes: Array<{ field: string; oldValue: any; newValue: any }> = [];
+
+    // Compare basic fields (ensure all relevant fields from DTO are compared)
+    if (original.name !== updated.name) {
+      changes.push({
+        field: 'spec.name',
+        oldValue: original.name,
+        newValue: updated.name,
+      });
+    }
+    if (original.description !== updated.description) {
+      changes.push({
+        field: 'spec.description',
+        oldValue: original.description,
+        newValue: updated.description,
+      });
+    }
+    if (original.componentType !== updated.componentType) {
+      changes.push({
+        field: 'spec.componentType',
+        oldValue: original.componentType,
+        newValue: updated.componentType,
+      });
+    }
+    if (original.typeId !== updated.typeId) {
+      changes.push({
+        field: 'spec.typeId',
+        oldValue: original.typeId,
+        newValue: updated.typeId,
+      });
+    }
+    if (original.tribe !== updated.tribe) {
+      changes.push({
+        field: 'spec.tribe',
+        oldValue: original.tribe,
+        newValue: updated.tribe,
+      });
+    }
+    if (original.squad !== updated.squad) {
+      changes.push({
+        field: 'spec.squad',
+        oldValue: original.squad,
+        newValue: updated.squad,
+      });
+    }
+    if (JSON.stringify(original.dependsOn) !== JSON.stringify(updated.dependsOn)) {
+      changes.push({
+        field: 'spec.dependsOn',
+        oldValue: original.dependsOn,
+        newValue: updated.dependsOn,
+      });
+    }
+    if (JSON.stringify(original.links) !== JSON.stringify(updated.links)) {
+      changes.push({
+        field: 'spec.links',
+        oldValue: original.links, // Keep as array for consistency if possible
+        newValue: updated.links,
+      });
+    }
+    if (JSON.stringify(original.labels) !== JSON.stringify(updated.labels)) {
+      changes.push({
+        field: 'spec.labels',
+        oldValue: original.labels,
+        newValue: updated.labels,
+      });
+    }
+    return changes;
+  }
+
   private readonly logger = new Logger(ComponentService.name);
 
   constructor(
@@ -180,7 +260,7 @@ export class ComponentService {
       const result = await this.graphqlService.executeQuery(query, variables);
 
       if (!result || !result.compass || !result.compass.component) {
-        throw new BadRequestException(`Component with id ${id} not found`);
+        throw new NotFoundException(`Component with id '${id}' not found`);
       }
 
       return this.mapComponentToResponseDto(result.compass.component);
@@ -189,29 +269,36 @@ export class ComponentService {
         `Failed to get component ${id}: ${error.message}`,
         error.stack,
       );
-      throw new BadRequestException(
-        `Failed to fetch component: ${error.message}`,
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new BadRequestException( // Keep as BadRequest for other errors during fetch
+        `Failed to fetch component with id '${id}': ${error.message}`,
       );
     }
   }
 
   async getComponentByName(name: string): Promise<ComponentResponseDto> {
     try {
+      // This implementation can be inefficient. Consider a direct GraphQL query if possible.
       const allComponents = await this.getAllComponents();
       const component = allComponents.find((c) => c.name === name);
 
       if (!component) {
-        throw new BadRequestException(`Component with name ${name} not found`);
+        throw new NotFoundException(`Component with name '${name}' not found`);
       }
 
       return component;
     } catch (error) {
       this.logger.error(
-        `Failed to get component by name ${name}: ${error.message}`,
+        `Failed to get component by name '${name}': ${error.message}`,
         error.stack,
       );
-      throw new BadRequestException(
-        `Failed to fetch component by name: ${error.message}`,
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new BadRequestException( // Keep as BadRequest for other errors during fetch
+        `Failed to fetch component by name '${name}': ${error.message}`,
       );
     }
   }
@@ -219,60 +306,57 @@ export class ComponentService {
   async createComponent(
     createComponentDto: CreateComponentDto,
   ): Promise<ComponentCreateResponse> {
+    // Handle both direct spec and nested component structure
+    const componentSpec =
+      createComponentDto.component?.spec || createComponentDto.spec;
+    const componentName =
+      componentSpec?.name || createComponentDto.component?.metadata?.name;
+
+    if (!componentName) {
+      throw new BadRequestException('Component name is required');
+    }
+    if (!componentSpec) {
+      throw new BadRequestException('Component specification is required');
+    }
+
+    // Validate typeId - This could also be a pipe or class-validator
+    const validTypeIds = [
+      'SERVICE',
+      'LIBRARY',
+      'WEBSITE',
+      'APPLICATION',
+      'TEMPLATE',
+      'RUNTIME',
+    ];
+    if (!validTypeIds.includes(componentSpec.typeId)) {
+      throw new BadRequestException( // Consider custom exception or more structured error
+        `Invalid typeId '${componentSpec.typeId}'. Must be one of: ${validTypeIds.join(', ')}`,
+      );
+    }
+
+    // Check if component with the same name already exists
     try {
-      // Handle both direct spec and nested component structure
-      const componentSpec =
-        createComponentDto.component?.spec || createComponentDto.spec;
-      const componentName =
-        componentSpec?.name || createComponentDto.component?.metadata?.name;
-
-      if (!componentName) {
-        throw new BadRequestException('Component name is required');
+      const existingComponent = await this.getComponentByName(componentName);
+      // If getComponentByName succeeds, it means a component with this name exists.
+      throw new ConflictException(
+        `Component with name '${componentName}' already exists. Existing ID: ${existingComponent.id}`,
+      );
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        // This is the expected case: component does not exist, so we can proceed.
+      } else if (error instanceof ConflictException) {
+        throw error; // Re-throw the conflict exception to be handled by controller/filter
+      } else {
+        // Any other error during the check should be re-thrown
+        this.logger.error(
+          `Unexpected error while checking for existing component '${componentName}': ${error.message}`,
+          error.stack,
+        );
+        throw error;
       }
-      if (!componentSpec) {
-        throw new BadRequestException('Component specification is required');
-      }
+    }
 
-      // Validate typeId
-      const validTypeIds = [
-        'SERVICE',
-        'LIBRARY',
-        'WEBSITE',
-        'APPLICATION',
-        'TEMPLATE',
-        'RUNTIME',
-      ];
-      if (!validTypeIds.includes(componentSpec.typeId)) {
-        throw new BadRequestException({
-          status_code: 400,
-          error: 'VALIDATION_ERROR',
-          message: 'Component validation failed',
-          details: [
-            {
-              field: 'spec.typeId',
-              error: `Invalid typeId. Must be one of: ${validTypeIds.join(', ')}`,
-            },
-          ],
-        });
-      }
-
-      // Check if component with the same name already exists
-      try {
-        const existingComponent = await this.getComponentByName(componentName);
-        if (existingComponent) {
-          const error = new BadRequestException(
-            `Component with name ${componentName} already exists`,
-          );
-          error['existingId'] = existingComponent.id;
-          throw error;
-        }
-      } catch (err) {
-        // If component not found, that's fine - we'll create it
-        if (!err.message.includes('not found')) {
-          throw err;
-        }
-      }
-
+    try {
       // Validate dependencies if provided
       if (componentSpec.dependsOn && componentSpec.dependsOn.length > 0) {
         const allComponents = await this.getAllComponents();
@@ -428,68 +512,44 @@ export class ComponentService {
   async updateComponent(
     id: string,
     updateComponentDto: UpdateComponentDto,
-  ): Promise<{ component: ComponentResponseDto }> {
+  ): Promise<{
+    component: ComponentResponseDto;
+    changes: Array<{ field: string; oldValue: any; newValue: any }>;
+  }> {
+    // First, get the existing component. This also serves as an existence check.
+    // getComponent will throw NotFoundException if not found.
+    const existingComponent = await this.getComponent(id);
+
+    const componentSpec = updateComponentDto.spec;
+    if (!componentSpec) {
+      throw new BadRequestException('Component specification (spec) is required for update.');
+    }
+
+    // Validate typeId if provided
+    if (componentSpec.typeId) {
+      const validTypeIds = ['SERVICE', 'LIBRARY', 'WEBSITE', 'APPLICATION', 'TEMPLATE', 'RUNTIME'];
+      if (!validTypeIds.includes(componentSpec.typeId)) {
+        throw new BadRequestException(
+          `Invalid typeId '${componentSpec.typeId}'. Must be one of: ${validTypeIds.join(', ')}`,
+        );
+      }
+    }
+
+    // Validate dependencies if provided (ensure they exist)
+    if (componentSpec.dependsOn && componentSpec.dependsOn.length > 0) {
+      const allComponents = await this.getAllComponents(); // Consider performance implications
+      const existingComponentNames = allComponents.map((c) => c.name);
+      for (const dependencyName of componentSpec.dependsOn) {
+        if (!existingComponentNames.includes(dependencyName)) {
+          throw new BadRequestException(
+            `Dependency component '${dependencyName}' not found.`,
+          );
+        }
+      }
+    }
+
     try {
-      // First check if the component exists
-      const existingComponent = await this.getComponent(id);
-
-      if (!existingComponent) {
-        throw new BadRequestException(`Component with id ${id} not found`);
-      }
-
-      const componentSpec = updateComponentDto.spec;
-      if (!componentSpec) {
-        throw new BadRequestException('Component specification is required');
-      }
-
-      // Validate typeId if provided
-      if (componentSpec.typeId) {
-        const validTypeIds = [
-          'SERVICE',
-          'LIBRARY',
-          'WEBSITE',
-          'APPLICATION',
-          'TEMPLATE',
-          'RUNTIME',
-        ];
-        if (!validTypeIds.includes(componentSpec.typeId)) {
-          throw new BadRequestException({
-            status_code: 400,
-            error: 'VALIDATION_ERROR',
-            message: 'Component update validation failed',
-            details: [
-              {
-                field: 'spec.typeId',
-                error: `Invalid typeId. Must be one of: ${validTypeIds.join(', ')}`,
-              },
-            ],
-          });
-        }
-      }
-
-      // Validate dependencies if provided
-      if (componentSpec.dependsOn && componentSpec.dependsOn.length > 0) {
-        const allComponents = await this.getAllComponents();
-        const existingComponentNames = allComponents.map((c) => c.name);
-
-        for (const dependency of componentSpec.dependsOn) {
-          if (!existingComponentNames.includes(dependency)) {
-            throw new BadRequestException({
-              status_code: 400,
-              error: 'VALIDATION_ERROR',
-              message: 'Component update validation failed',
-              details: [
-                {
-                  field: 'spec.dependsOn',
-                  error: `Dependency '${dependency}' not found`,
-                },
-              ],
-            });
-          }
-        }
-      }
-
-      // Update component mutation
+      // Update component mutation - ensure it returns all fields for mapComponentToResponseDto
       const mutation = `
         mutation updateComponent($id: ID!, $componentInput: UpdateCompassComponentInput!) {
           compass {
@@ -498,166 +558,115 @@ export class ComponentService {
               component {
                 id
                 name
-                type {
-                  name
-                  id
-                }
+                type { name id }
                 description
-                links {
-                  name
-                  type
-                  url
-                }
+                links { name type url }
                 labels
-                customFields {
-                  key
-                  value
-                }
+                customFields { key value }
+                relationships { nodes { sourceId targetId type } } # For dependsOn
+                createdAt
+                updatedAt
               }
-              errors {
-                message
-              }
+              errors { message }
             }
           }
         }
       `;
 
-      const variables: any = {
-        id: id,
-        componentInput: {},
-      };
+      const variables: any = { id: id, componentInput: {} };
 
-      // Only include fields that are being updated
-      if (componentSpec.name) {
-        variables.componentInput.name = componentSpec.name;
+      if (componentSpec.name) variables.componentInput.name = componentSpec.name;
+      if (componentSpec.description !== undefined) variables.componentInput.description = componentSpec.description;
+      if (componentSpec.typeId) variables.componentInput.typeId = componentSpec.typeId;
+      if (componentSpec.links) variables.componentInput.links = componentSpec.links;
+      if (componentSpec.labels) variables.componentInput.labels = componentSpec.labels;
+
+      const customFieldsToUpdate: any = [];
+      if (componentSpec.tribe !== undefined) customFieldsToUpdate.push({ key: 'tribe', value: componentSpec.tribe });
+      if (componentSpec.squad !== undefined) customFieldsToUpdate.push({ key: 'squad', value: componentSpec.squad });
+      if (componentSpec.componentType !== undefined) {
+        customFieldsToUpdate.push({ key: 'componentType', value: componentSpec.componentType });
       }
-
-      if (componentSpec.description !== undefined) {
-        variables.componentInput.description = componentSpec.description;
-      }
-
-      if (componentSpec.typeId) {
-        variables.componentInput.typeId = componentSpec.typeId;
-      }
-
-      if (componentSpec.links) {
-        variables.componentInput.links = componentSpec.links.map((link) => ({
-          name: link.name,
-          type: link.type,
-          url: link.url,
-        }));
+      if (customFieldsToUpdate.length > 0) {
+        variables.componentInput.customFields = customFieldsToUpdate;
       }
 
-      if (componentSpec.labels) {
-        variables.componentInput.labels = componentSpec.labels;
-      }
-
-      // Update custom fields
-      const customFields: any = [];
-      if (componentSpec.tribe) {
-        customFields.push({ key: 'tribe', value: componentSpec.tribe });
-      }
-      if (componentSpec.squad) {
-        customFields.push({ key: 'squad', value: componentSpec.squad });
-      }
-      if (componentSpec.componentType) {
-        customFields.push({
-          key: 'componentType',
-          value: componentSpec.componentType,
-        });
-      }
-      if (customFields.length > 0) {
-        variables.componentInput.customFields = customFields;
-      }
-
-      const result = await this.graphqlService.executeMutation(
-        mutation,
-        variables,
-      );
+      const result = await this.graphqlService.executeMutation(mutation, variables);
 
       if (
-        !result ||
-        !result.compass ||
-        !result.compass.updateComponent ||
-        !result.compass.updateComponent.success ||
+        !result?.compass?.updateComponent?.success ||
         !result.compass.updateComponent.component
       ) {
-        const errorMsg =
-          result?.compass?.updateComponent?.errors?.[0]?.message ||
-          'Unknown error';
-        throw new BadRequestException(
-          `Failed to update component: ${errorMsg}`,
-        );
+        const errorMsg = result?.compass?.updateComponent?.errors?.[0]?.message || 'Unknown error during update';
+        throw new BadRequestException(`Failed to update component: ${errorMsg}`);
       }
 
-      const updatedComponent = result.compass.updateComponent.component;
+      const updatedGqlComponent = result.compass.updateComponent.component;
 
-      // Update relationships for dependencies if provided
+      // Update relationships for dependencies if 'dependsOn' was part of the spec
       if (componentSpec.dependsOn !== undefined) {
         await this.updateDependencyRelationships(id, componentSpec.dependsOn);
+        // Re-fetch might be needed if updateDependencyRelationships doesn't return the full component
+        // For now, assume updatedGqlComponent has fresh enough relationship data if queried correctly
       }
 
+      const updatedComponentDto = this.mapComponentToResponseDto(updatedGqlComponent);
+      const changes = this.generateChangeLog(existingComponent, updatedComponentDto);
+
       return {
-        component: this.mapComponentToResponseDto(updatedComponent),
+        component: updatedComponentDto,
+        changes: changes,
       };
     } catch (error) {
-      if (error instanceof BadRequestException) {
+      this.logger.error(`Failed to update component ${id}: ${error.message}`, error.stack);
+      if (error instanceof BadRequestException || error instanceof NotFoundException || error instanceof ConflictException) {
         throw error;
       }
-      throw new BadRequestException(
-        `Failed to update component: ${error.message}`,
-      );
+      throw new BadRequestException(`Failed to update component ${id}: ${error.message}`);
     }
   }
 
-  async deleteComponent(id: string): Promise<void> {
-    try {
-      // First check if the component exists
-      await this.getComponent(id);
+  async deleteComponent(id: string): Promise<{ id: string; message: string }> {
+    // First, check if the component exists. getComponent will throw NotFoundException if not.
+    await this.getComponent(id);
 
+    // Check for dependencies before deletion
+    const dependencies = await this.checkDependencies(id);
+    if (dependencies && dependencies.length > 0) {
+      // Prepare a summary of dependencies for the error message
+      const dependencySummary = dependencies.map(dep => `${dep.name} (ID: ${dep.id})`).join(', ');
+      throw new ConflictException(
+        `Cannot delete component '${id}' as it has active dependencies: ${dependencySummary}`,
+        // Consider adding dependencies to the error object if the filter can handle it
+      );
+    }
+
+    try {
       const mutation = `
         mutation deleteComponent($id: ID!) {
           compass {
             deleteComponent(id: $id) {
               success
               deletedComponentId
-              errors {
-                message
-              }
+              errors { message }
             }
           }
         }
       `;
+      const variables = { id: id };
+      const result = await this.graphqlService.executeMutation(mutation, variables);
 
-      const variables = {
-        id: id,
-      };
-
-      const result = await this.graphqlService.executeMutation(
-        mutation,
-        variables,
-      );
-
-      if (
-        !result ||
-        !result.compass ||
-        !result.compass.deleteComponent ||
-        !result.compass.deleteComponent.success
-      ) {
-        const errorMsg =
-          result?.compass?.deleteComponent?.errors?.[0]?.message ||
-          'Unknown error';
-        throw new BadRequestException(
-          `Failed to delete component: ${errorMsg}`,
-        );
+      if (!result?.compass?.deleteComponent?.success) {
+        const errorMsg = result?.compass?.deleteComponent?.errors?.[0]?.message || 'Unknown error during deletion';
+        throw new BadRequestException(`Failed to delete component '${id}': ${errorMsg}`);
       }
+      return { id: id, message: `Component '${id}' deleted successfully.` };
     } catch (error) {
-      if (error instanceof BadRequestException) {
+      this.logger.error(`Failed to delete component ${id}: ${error.message}`, error.stack);
+       if (error instanceof BadRequestException || error instanceof NotFoundException || error instanceof ConflictException) {
         throw error;
       }
-      throw new BadRequestException(
-        `Failed to delete component: ${error.message}`,
-      );
+      throw new BadRequestException(`Failed to delete component ${id}: ${error.message}`);
     }
   }
 
@@ -886,7 +895,8 @@ export class ComponentService {
 
   private mapComponentToResponseDto(component: any): ComponentResponseDto {
     if (!component) {
-      throw new BadRequestException('Invalid component data');
+      this.logger.error('mapComponentToResponseDto received null or undefined component data.');
+      throw new BadRequestException('Invalid component data provided for mapping.');
     }
 
     // Extract dependencies from relationships
