@@ -1,0 +1,76 @@
+name: Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: clusters-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: write
+  actions: read
+
+jobs:
+  commit-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.set-artifact-tag-version.outputs.ARTIFACT_TAG_VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: set-artifact-tag-version
+        run: echo "ARTIFACT_TAG_VERSION=v$(git log --oneline origin/main | wc -l | sed 's/ //g')" >> $GITHUB_OUTPUT
+
+      - uses: motain/onefootball-actions/docker-build-push@16b0694d21a693fdc55af679e8c0df62f308904c
+        id: build-release-candidate
+        with:
+          tag: ${{ steps.set-artifact-tag-version.outputs.ARTIFACT_TAG_VERSION }}
+          latest: true
+          push: true
+          use-cache: true
+
+      - id: security-checks
+        uses: motain/onefootball-actions/security@master
+        continue-on-error: true
+        with:
+          token: ${{ github.token }}
+          path: '.'
+          image-url: ${{ steps.build-release-candidate.outputs.image-url }}
+
+      - name: Create git tag
+        id: create-tag
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: ${{ steps.set-artifact-tag-version.outputs.ARTIFACT_TAG_VERSION }}
+      - uses: motain/slack-actions/cd/cycle-result@main
+        if: ${{ always() }}
+        with:
+          slack-token: ${{ secrets.CONTINUOUS_DELIVERY_APP_SLACK_TOKEN }}
+          channel: 'p-developer-xp-notifications'
+          steps-context: ${{ toJson(steps) }}
+  release-cycle:
+    needs:
+      - commit-cycle
+    runs-on: ubuntu-latest
+    concurrency: release-cycle
+    steps:
+      - uses: actions/checkout@v4
+      - id: deploy-production
+        uses: motain/onefootball-actions/paas-deploy@master
+        with:
+          environment: production
+          tag: ${{ needs.commit-cycle.outputs.version }}
+          pr-key: ${{ secrets.PAAS_CREATE_AND_MERGE_TO_HELM_CHARTS }}
+          approver-key: ${{ secrets.PAAS_AUTO_APPROVER_HELM_CHARTS }}
+      - uses: motain/slack-actions/cd/cycle-result@main
+        if: ${{ always() }}
+        with:
+          slack-token: ${{ secrets.CONTINUOUS_DELIVERY_APP_SLACK_TOKEN }}
+          channel: 'p-developer-xp-notifications'
+          steps-context: ${{ toJson(steps) }}

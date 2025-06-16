@@ -1,0 +1,27 @@
+[meta]
+name = "compass-service"
+
+[tags]
+tribe = "platform"
+squad = "cloud-runtime"
+
+[service]
+replicas_max = 4
+replicas_min = 3
+internal_port = 3000
+liveness_probe_http_get_path = "/health"
+readiness_probe_http_get_path = "/health"
+target_cpu_utilization_percentage = 80
+target_memory_utilization_percentage = 80
+cpu_requests = "100m"
+memory_requests = "100Mi"
+memory_limits = "120Mi"
+
+[[service.production.ingress]]
+host = "compass-service.onefootball.com"
+
+[envs.production]
+COMPASS_HOST = "https://onefootball.atlassian.net"
+COMPASS_CLOUD_ID = "fca6a80f-888b-4079-82e6-3c2f61c788e2"
+OTEL_SERVICE_NAME = "compass-service"
+OTEL_RESOURCE_ATTRIBUTES = "of.tail_sampling=refinery,of.sample_rate=100000,of.error_sample_rate=1000"
